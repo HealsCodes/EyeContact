@@ -1,0 +1,593 @@
+# EyeContact - EyeTV access for PLEX Media Server
+# Copyright (C) 2011-2012 Rene Koecher <shirk@bitspin.org>
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+# 
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+# 
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+import re
+import time
+import cPickle
+
+try:
+	from urllib2_new import HTTPError
+except ImportError:
+	from urllib2 import HTTPError
+
+BASE_URL           = 'http://%(eyetv_live_host)s:%(eyetv_live_port)s'
+URL_STATUS         = BASE_URL + '/live/status/0/_%(eyetv_live_devid)s_MAINMENU'
+URL_SEED           = BASE_URL + '/live/seed/0'
+URL_STREAM         = BASE_URL + '/live/stream'
+URL_STREAM_DIRECT  = BASE_URL + '/live/stream/%(stream_url)s'
+URL_TIMEZONE       = BASE_URL + '/live/timeZone/0'
+URL_FAVORITES      = BASE_URL + '/live/favorites/0/_%(eyetv_live_devid)s_FAVORITES'
+URL_CHANNEL_LIST   = BASE_URL + '/live/channels/%(epg_detail)d/%(channel_list)s/%(item_base)d/%(item_count)d/_%(eyetv_live_devid)s_CHANNELS'
+URL_TUNE_TO_SAFARI = BASE_URL + '/live/tuneto/1/%(kbps)d/%(service_id)s/_SAFARI_PLAYER'
+URL_TUNE_TO_IDEV   = BASE_URL + '/live/tuneto/6/%(kbps)d/0/1/6/%(service_id)s/_%(eyetv_live_devid)s_PLAYER'
+URL_READY          = BASE_URL + '/live/ready/0/_%(eyetv_live_devid)s_PLAYER'
+URL_RECORD_GET     = BASE_URL + '/live/showstatus/0/%(show_uuid)s/%(show_starttime)s/%(show_stoptime)s/%(service_id)s/_%(eyetv_live_devid)s_DETAILS'
+URL_RECORD_SET     = BASE_URL + '/live/schedule/1/%(show_uuid)s/%(service_id)s/_%(eyetv_live_devid)s_DETAILS'
+URL_RECORD_DEL     = BASE_URL + '/live/deleteschedule/0/%(show_reckey)s/_%(eyetv_live_devid)s_DETAILS'
+URL_RECORD_LIST    = BASE_URL + '/live/scheduleList/0/%(item_base)d/%(item_count)d/_%(eyetv_live_devid)s_SCHEDULES'
+URL_EPG_REQUEST    = BASE_URL + '/epg/request/0/%(ts_start)d/%(ts_end)d/%(service_id)s/_%(eyetv_live_devid)s_EPG'
+URL_EPG_SHOW_INFO  = BASE_URL + '/epg/info/1/%(show_uuid)s/_%(eyetv_live_devid)s_EPG'
+
+URL_HEADERS = {
+	'User-Agent'          : 'EyeTV/1.2.3 CFNetwork/528.2 Darwin/11.0.0',
+	'Accept'              : '*/*',
+	'X-EyeConnect-Client' : 'iPhoneApp1',
+	'X-EyeConnect-Token'  : '',
+	'X-Device-Name'       : 'PLEX-EyeConnect',
+	'X-App-UUID'          : '',
+	'Accept-Encoding'     : 'gzip, deflate',
+	'Connection'          : 'keep-alive',
+}
+
+PREFS_HOST         = 'eyetv_live_host'
+PREFS_PORT         = 'eyetv_live_port'
+PREFS_PASSCODE     = 'eyetv_live_pass'
+PREFS_DEVID        = 'eyetv_live_devid'
+PREFS_TOKEN        = 'eyetv_live_token'
+PREFS_HLS          = 'eyetv_live_laika'
+PREFS_LOFI         = 'eyetv_live_lofi'
+PREFS_EPG_DETAIL   = 'eyetv_live_epg_detail'
+
+#=============================================================================
+# helper methods
+def RunRequest(url, *args, **kwargs):
+	"""
+	Run a HTTP-Request returning parsed JSON data oder `default`
+	"""
+	def digest_auth_request(url, headers={}):
+		try:
+			req = HTTP.Request(url, headers=headers)
+			req.load()
+			return req.content 
+		except HTTPError, error:
+			Log(error.headers)
+			auth_header = error.headers.get('WWW-Authenticate', '')
+			if auth_header:
+				if not auth_header.lower().startswith('digest'):
+					Log.Error('EyeTVLive: digest_auth_request: Unsupported auth method: \'%s\'', auth_header)
+					raise
+
+				realm = re.findall(r'\srealm="(?P<realm>[^"]+)",?\s?', auth_header)
+				if not realm:
+					Log.Error('EyeTVLive: digest_auth_request: no realm in request')
+					raise
+				else:
+					realm = realm[-1]
+
+				nonce = re.findall(r'\snonce="(?P<nonce>[^"]+)",?\s?', auth_header)
+				if not nonce:
+					Log.Error('EyeTVLive: digest_auth_request: no nonce in request')
+					raise
+				else:
+					nonce = nonce[-1]
+
+				uri = re.sub(r'https?://[^/]+', '', url)
+				ha1 = Hash.MD5('eyetv:%s:%s' % (realm, Prefs[PREFS_PASSCODE]))
+				ha2 = Hash.MD5('GET:%s' % uri)
+				response = Hash.MD5('%s:%s:%s' % (ha1, nonce, ha2))
+
+				headers['Authorization'] = 'Digest username="eyetv", realm="%s", nonce="%s", uri="%s", response="%s"' % (realm, nonce, uri, response)
+
+				#Log.Debug('Digest-Auth - headers: %s' % str(headers))
+				req =  HTTP.Request(url, headers=headers)
+				req.load()
+				return req.content
+			else:
+				raise
+
+	args = dict(kwargs)
+	default = args.pop('default', None)
+
+	for k in [ PREFS_HOST, PREFS_PORT, PREFS_DEVID ]:
+		if k == PREFS_DEVID:
+			args[k] = Prefs[k].upper()
+			if Prefs[k].upper() == 'BROWSER' or Prefs[PREFS_LOFI]:
+				args[k] = 'SAFARI'
+		else:
+			args[k] = Prefs[k]
+        
+	if not Prefs[PREFS_LOFI]:
+		args[PREFS_TOKEN] = Prefs[PREFS_TOKEN]
+
+		if Prefs[PREFS_DEVID].upper() == 'IPHONE':
+			URL_HEADERS['User-Agent'] = 'EyeTV/1.2.3 CFNetwork/485.13.9 Darwin/11.0.0'
+			URL_HEADERS['X-App-UUID'] = '9735687db77159a0396d68a925433ec8'
+			URL_HEADERS['X-EyeConnect-Token'] = Prefs[PREFS_TOKEN]
+		elif Prefs[PREFS_DEVID].upper() == 'IPAD':
+			URL_HEADERS['User-Agent'] = 'EyeTV/1.2.3 CFNetwork/528.2 Darwin/11.0.0'
+			URL_HEADERS['X-App-UUID'] = 'bb98c14885bb94442623ca1afe7b3912'
+			URL_HEADERS['X-EyeConnect-Token'] = Prefs[PREFS_TOKEN]
+
+	else:
+		URL_HEADERS['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_3) AppleWebKit/534.55.3 (KHTML, like Gecko) Version/5.1.3 Safari/534.53.10'
+		URL_HEADERS['X-App-UUID'] = '-'
+
+	try:
+		if 'plain_http' in kwargs and kwargs['plain_http']:
+			try:
+				res = digest_auth_request(url % args, headers=URL_HEADERS)
+			except:
+				res = None
+		else:
+			res = JSON.ObjectFromString(digest_auth_request(url % args, headers=URL_HEADERS))
+			if not res:
+				return default
+			return res
+
+	except HTTPError, he:
+		Log.Error('EyeTVLive: run_request: failed: %s (HTTP: %d, %s)', he.info(), he.getcode(), he.geturl())
+		return default
+
+	except Exception, e:
+		Log.Error('EyeTVLive: run_request: generic error: %s', e)
+		return default
+
+def WrapData(data):
+	return String.Encode(cPickle.dumps(data))
+
+def UnWrapData(data):
+	return cPickle.loads(String.Decode(data))
+
+def TsUNIXToNSDate(seconds):
+	"""
+	Given the current seconds since epoch return a dst-adjusted NSDate version
+	"""
+	try:
+		ts = time.localtime(seconds)
+		if ts.tm_isdst == 1:
+			seconds = seconds - 3600
+		return long(seconds - time.mktime(time.strptime('1.1.2001', '%d.%m.%Y')))
+	except Exception, e:
+		return 0
+
+def TsNSDateToUNIX(seconds):
+	"""
+	Given a timestamp in seconds since NSDate-Epoch return a dst-adjusted timestamp
+	"""
+	try:
+		if time.localtime().tm_isdst == 1:
+			seconds = seconds + 3600
+		return long(seconds + time.mktime(time.strptime('1.1.2001', '%d.%m.%Y')))
+	except Exception, e:
+		return 0
+
+def FormatFavorites():
+	res = RunRequest(URL_FAVORITES, default = [])
+	res.append({ "name" : "Channels", "uniqueID" : "0" })
+	return res
+
+def FormatChannelList(uuid):
+	res = {}
+	channelList = RunRequest(URL_CHANNEL_LIST, 
+	                         epg_detail   = 0,
+	                         channel_list = uuid,
+	                         item_base    = 0,
+	                         item_count   = 0,
+	                         default      = { "channelList" : [], "total" : -1 })
+
+	total  = channelList['total']
+	base   = 0
+	if Prefs[PREFS_LOFI]:
+		detail = 0
+	else:
+		detail = 2
+
+	while base < total:
+		channelList = RunRequest(URL_CHANNEL_LIST,
+		                         epg_detail   = detail,
+		                         channel_list = uuid,
+		                         item_base    = base,
+		                         item_count   = 100,
+		                         default      = { "channelList" : [], "total" : -1 })
+
+		if channelList.get('total', 0) == -1:
+			break
+
+		for channel in channelList["channelList"]:
+			live = ''
+			next = ''
+			uuid = '0000'
+			if detail == 2:
+				try:
+					date = time.localtime(TsNSDateToUNIX(channel["EPGData"][0]["STARTTIME"]))
+					if channel["EPGData"][0]["ABSTRACT"]:
+						live = '%(TITLE)s - %(ABSTRACT)s' % channel["EPGData"][0]
+					else:
+						live = '%(TITLE)s' % channel["EPGData"][0]
+
+					live = time.strftime('%H:%M: ', date) + live
+					uuid = channel["EPGData"][0]["UNIQUEID"]
+				except IndexError:
+					pass
+
+				try:
+					date = time.localtime(TsNSDateToUNIX(channel["EPGData"][1]["STARTTIME"]))
+					if channel["EPGData"][1]["ABSTRACT"]:
+						next = '%(TITLE)s - %(ABSTRACT)s' % channel["EPGData"][1]
+					else:
+						next = '%(TITLE)s' % channel["EPGData"][1]
+
+					next = time.strftime('%H:%M: ', date) + next
+				except IndexError:
+					pass
+
+				channel = channel["channelInfo"]
+
+			if not channel["displayNumber"] or \
+			   not channel["name"]:
+				continue
+
+			# don't try 'long()' here, some EyeTVs have channels like 3-1, 3-2, 5-1, 5-2 ...
+			# nr = long(channel["displayNumber"])
+			nr = channel["displayNumber"]
+			res[nr] = {
+				"name"    : channel["name"],
+				"live"    : live,
+				"uuid"    : uuid,
+				"next"    : next,
+				"service" : channel["serviceID"]
+			}
+		if len(channelList["channelList"]):
+			base += len(channelList["channelList"])
+		else:
+			break
+
+	return res
+
+def FormatChannelEPG(uuid):
+	res = []
+	start_date = time.time()
+	end_date   = start_date + 86399
+
+	epg_list = RunRequest(URL_EPG_REQUEST,
+	                      ts_start   = TsUNIXToNSDate(start_date),
+	                      ts_end     = TsUNIXToNSDate(end_date),
+	                      service_id = uuid,
+	                      default    = [{ "EPGData" : [] , "channelInfo" : { "name" : "" }}])
+
+	channel    = epg_list[0]["channelInfo"]["name"]
+	service_id = epg_list[0]["channelInfo"]["serviceID"]
+
+	for show in epg_list[0]["EPGData"]:
+		if Prefs[PREFS_EPG_DETAIL]:
+			data = FormatChannelInfo('%s|%s' % (service_id, show["UNIQUEID"]))
+			info      = data['description']
+			scheduled = data['scheduled'] 
+		else:
+			info = ''
+			scheduled = False
+
+		date = time.localtime(TsNSDateToUNIX(show["STARTTIME"]))
+		live = show["TITLE"]
+		live = time.strftime('%H:%M: ', date) + live
+		uuid = show["UNIQUEID"]
+
+
+		res.append({
+			"name"      : show["TITLE"],
+			"label"     : live,
+			"channel"   : channel,
+			"summary"   : info,
+			"uuid"      : uuid,
+			"progid"    : show["PROGID"],
+			"starttime" : show["STARTTIME"],
+			"stoptime"  : show["STOPTIME"],
+			"duration"  : long(show["STOPTIME"] - show["STARTTIME"]),
+			"scheduled" : scheduled
+		})
+
+	return res
+
+def FormatChannelInfo(uuid):
+	if '|' in uuid:
+		service, uuid = uuid.split('|')
+	else:
+		service = None
+
+	if Prefs[PREFS_LOFI] or uuid == '0000':
+		# response time optimization
+		data = None
+	else:
+		data = RunRequest(URL_EPG_SHOW_INFO, show_uuid=uuid, default=None)
+
+	res = {
+		'title'       : '-',
+		'abstract'    : '-',
+		'description' : '-',
+		'fsk'         : '0',
+		'year'        : str((1970 + int(time.time() / 31536000))),
+		'director'    : '-',
+		'others'      : '-',
+		'countries'   : '-',
+		'starttime'   : 0,
+		'stoptime'    : 0,
+		'scheduled'   : False,
+		'progid'      : 0
+	}
+
+	if data:
+		res['title']       = data[0].get('TITLE'      , res['title'])
+		res['abstract']    = data[0].get('ABSTRACT'   , res['abstract'])
+		res['description'] = data[0].get('DESCRIPTION', res['description'])
+		res['fsk']         = data[0].get('FSK'        , res['fsk'])
+		res['year']        = int(data[0].get('YEAR'   , res['year']).replace('-', ',').split(',')[0])
+		res['director']    = data[0].get('DIRECTOR'   , res['director'])
+		res['others']      = data[0].get('OTHERS'     , res['others'])
+		res['countries']   = data[0].get('COUNTRIES'  , res['countries'])
+		res['starttime']   = TsNSDateToUNIX(data[0].get('STARTTIME', 0))
+		res['stoptime']    = TsNSDateToUNIX(data[0].get('STOPTIME', 0))
+
+		if service:
+			data = RunRequest(URL_RECORD_GET,
+			                  service_id     = service,
+			                  show_uuid      = uuid, 
+			                  show_starttime = data[0].get('STARTTIME', 0),
+			                  show_stoptime  = data[0].get('STOPTIME', 0),
+			                  default        = { "status" : "NOT SET", "programID" : 0 })
+
+			res['progid'] = data["programID"]
+			if data["status"].upper() == "NOT SET":
+				res['scheduled'] = False
+			else:
+				res['scheduled'] = True
+
+	return res
+
+def FormatSchedules():
+	res = []
+	if Prefs[PREFS_LOFI]:
+		return res
+
+	data = RunRequest(URL_RECORD_LIST,
+	                  item_base  = 0,
+	                  item_count = 0,
+	                  default    = { "schedules" : [], "total" : -1 })
+
+	total  = data['total']
+	base   = 0
+
+	while base < total:
+		data = RunRequest(URL_RECORD_LIST,
+		                  item_base  = base,
+		                  item_count = 100,
+		                  default    = { "schedules" : [], "total" : -1 })
+
+		if data.get('total', 0) == -1:
+			break
+
+		for schedule in data["schedules"]:
+			for key in ["info"]:
+				if not key in schedule:
+					Log("EyeTVLive(URL): skipping invalid schedule - %s missing" % key)
+					continue
+
+				try:
+					res.append({
+						'title'    : schedule["info"]["title"],
+						'summary'  : schedule["info"]["description"],
+						'service'  : schedule["info"]["source info"]["service"],
+						'start'    : TsNSDateToUNIX(schedule["info"]["start"]),
+						'duration' : schedule["info"]["duration"],
+						'channel'  : schedule["info"]["channelName"],
+
+						'uuid'     : schedule["epg info"]["UNIQUEID"],
+					})
+				except KeyError, ke:
+					Log("EyeTVLive(URL): excluding schedule - KeyError: %s", str(key))
+					Log("EyeTVLive(URL): item is: %s" % str(schedule))
+
+		if len(data["schedules"]):
+			base += len(data["schedules"])
+		else:
+			break
+
+	return res
+
+
+def RecordControl(url):
+	res = False
+	match = re.match(r'eyetv://record/([^/]+)/([^/]+)/(on|off)', url)
+	if match:
+		(service_id, uuid, cmd) = match.groups()
+		if cmd == 'on':
+			data = RunRequest(URL_RECORD_SET,
+			                  show_uuid  = uuid,
+			                  service_id = service_id,
+			                  default    = [{ "COLLISIONINFOS" : [], "PROGRAMID" : 0 }])
+
+			if str(data[0]["PROGRAMID"]) > 0 and len(data[0]["COLLISIONINFOS"]) == 0:
+				res = True
+		else:
+			data = FormatChannelInfo('%s|%s' % (service_id, uuid))
+			if data['scheduled']:
+				RunRequest(URL_RECORD_DEL, show_reckey=data['progid'])
+				res = True
+
+	return res
+
+def PlayVideo(id, platform):
+	HTTP.Headers['Cache-Control'] = 'no-cache'
+
+	if Prefs[PREFS_LOFI] or Prefs[PREFS_DEVID].upper() == 'BROWSER':
+		res = RunRequest(URL_TUNE_TO_SAFARI, kbps=4540, service_id=id)
+	else:
+		res = RunRequest(URL_TUNE_TO_IDEV, kbps=4540, service_id=id)
+
+	if not res or not res['success']:
+		Log("EyeTVLive(URL): PlayVideo: Tuning failed.")
+		return None
+	else:
+		# wait until ready
+		stream_url = res['m3u8URL']
+		res = { 1 : True}
+		time.sleep(1.5) # don't hurry EyeTV..
+		while res:
+			res = RunRequest(URL_READY)
+			if not res:
+				Log('EyeTVLive(URL): PlayVideo: Failed to switch channels')
+				return None
+			if res['isReadyToStream']:
+				live_url = URL_STREAM_DIRECT % {
+				                        'service_id'      : id,
+				                        'eyetv_live_host' : Prefs[PREFS_HOST], 
+				                        'eyetv_live_port' : Prefs[PREFS_PORT],
+				                        'stream_url'      : stream_url
+				}
+
+				Log.Debug('EyeTVLive(URL): PlayVideo: stream is ready, live-url: %s' % live_url)
+
+				# select the best playback method based on client
+				if platform == ClientPlatform.iOS:
+					# iOS should be able to stream these since
+					# EyeTV created them for this purpose!
+					Log.Debug('EyeTVLive(URL): PlayVideo: client platform is iOS')
+					return Redirect(live_url)
+
+				# all other clients receive a modified list
+				original_playlist = HTTP.Request(live_url).content
+				new_playlist = ''
+
+				if platform == ClientPlatform.Roku:
+					# Roku doesn't like blanks in his playlist (NatGeo told me)
+					Log.Debug('EyeTVLive(URL): PlayVideo: client platform Roku')
+					for line in original_playlist.splitlines():
+						if len(line):
+							new_playlist = new_playlist + line
+							new_playlist = new_playlist + '\n'
+
+					return new_playlist
+
+				# -- default for the rest --
+				# EyeTV uses relative URL in it's toplevel m3u8
+				# For some reason PLEX just can't handle these correct so we expand them.
+				Log.Debug('EyeTVLive(URL): PlayVideo: client platform generic')
+				base_url = '/'.join(live_url.split('/')[:-1])
+
+				for line in original_playlist.splitlines():
+					if line:
+						# strip whitespaces
+						if '://' in line:
+							new_playlist += line + '\n'
+							continue
+
+						if '.m3u8' in line:
+							# create absolute URIs
+							line = base_url + '/' + line
+							new_playlist += line + '\n'
+							continue
+
+						new_playlist += line + '\n'
+
+				return new_playlist
+			else:
+				Log.Debug('EyeTVLive(URL): PlayVideo: buffering stream (%f/%f)..',
+				          res['doneEncoding'], res['minEncodingToStartStreaming'])
+				time.sleep(0.5)
+
+#=============================================================================
+
+def MetadataObjectForURL(url):
+	"""Returns a metadata object for the given URL
+	(VideoClipObject, MovieObject, Episodobject, TrackObject, PhotoObject)
+	"""
+	Log('MetadataObjectForURL(%s)' % url)
+
+	match = re.match(r'eyetv://show/([^/]+)/([^/]+)', url)
+	if match:
+		service_id, uuid = match.groups()
+		data = FormatChannelInfo(uuid)
+
+		#TODO: Add Thumbs
+		return MovieObject(
+				title     = data['title'],
+				summary   = '%s\n[%s, %s, %s]' % (data['description'], data['year'], data['abstract'], data['director']),
+				duration  = int(data['stoptime'] - data['starttime']) * 1000,
+				year      = int(data['year']),
+				directors = data['director'].strip().split('\n'),
+				countries = data['countries'].strip().split(','),
+				url       = url
+		)
+	pass
+
+def MediaObjectsForURL(url):
+	"""Returns a list of MediaObject's which represent the video streams
+	 available for the specific video/photo/music
+	 - expected to return quickly.
+	 - should avoid HTTP requests / delays
+	 """
+	match = re.match(r'eyetv://show/([^/]+)/([^/]+)', url)
+	if match:
+
+		if Client.Platform in [ClientPlatform.iOS, ClientPlatform.Roku]:
+			return [MediaObject(
+				protocols = ['hls', 'http-live-streaming', 'http-mp4-streaming'],
+				parts = [PartObject(key=HTTPLiveStreamURL(Callback(PlayVideo, id=match.groups()[0], platform=Client.Platform)))]
+				#,audio_channels = 2
+			)]
+		else:
+			return [MediaObject(
+				parts = [PartObject(key=HTTPLiveStreamURL(Callback(PlayVideo, id=match.groups()[0], platform=Client.Platform)))]
+				#,audio_channels = 2
+			)]
+	pass
+
+def NormalizeURL(url):
+	"""Returns the standard normalised URL
+	- expected to return quickly.
+	- should avoid HTTP requests / delays"""
+	if re.match(r'eyetv://status', url):
+		return WrapData(RunRequest(URL_STATUS, default={ "isUp" : False }))
+
+	elif re.match(r'eyetv://favorites', url):
+		return WrapData(FormatFavorites())
+
+	elif re.match(r'eyetv://channels', url):
+		return WrapData(FormatChannelList(url.split('/')[-1]))
+
+	elif re.match(r'eyetv://info/([^/]+)', url):
+		return WrapData(FormatChannelInfo(url.split('/')[-1]))
+
+	elif re.match(r'eyetv://epg/([^/]+)', url):
+		return WrapData(FormatChannelEPG(url.split('/')[-1]))
+
+	elif re.match(r'eyetv://record/([^/]+)/([^/])+/(on|off)', url):
+		return WrapData(RecordControl(url))
+
+	elif re.match(r'eyetv://schedules', url):
+		return WrapData(FormatSchedules())
+
+	return url

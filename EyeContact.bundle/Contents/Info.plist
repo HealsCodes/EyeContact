@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Comuter//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyLists-1.0.dtd">
+<plist version="1.0">
+	<dict>
+		<key>CFBundleDevelopmentRegion</key>
+		<string>English</string>
+		<key>CFBundleIdentifier</key>
+		<string>org.bitspin.plexapp.eyecontact</string>
+		<!-- 
+			-= PLEX specific settings =-
+		-->
+		<key>PlexClientPlatforms</key>
+		<string>MacOSX,iOS,Roku</string><!-- ,iOS,Android,LGTV -->
+		<key>PlexFrameworkVersion</key>
+		<string>2</string>
+		<!-- 
+		 	run in daemon mode to support legacy TSStreaming
+		-->
+		<key>PlexPluginMode</key>
+		<string>Daemon</string>
+		<!--
+			require elevated policy for HelperKit et. al
+		-->
+		<key>PlexPluginCodePolicy</key>
+		<string>Elevated</string>
+		<!--
+			media container settings
+		-->
+		<key>PlexMediaContainer</key>
+		<array>
+			<string>TS</string>
+			<string>M4V</string>
+		</array>
+		<key>PlexAudioCodec</key>
+		<array>
+			<string>AAC</string>
+		</array>
+		<key>PlexVideoCodec</key>
+		<array>
+			<string>H.264</string>
+		</array>
+	</dict>
+</plist>
