@@ -3,7 +3,7 @@ About
 EyeContact is a plugin for the Plex Media Center which allows access to the live streaming features of Elgato's EyeTV software.   
 The Project was conceived in June 2011 and was rewritten from scratch in September 2012.   
 
-There is a nice but lenghty thread available on the [PLEX Forums](http://forums.plexapp.com/index.php/topic/27784-eyetv-live-streaming/) as well as a [Wiki page](http://wiki.plexapp.com/index.php/EyeTV_Live).   
+There is a nice but lenghty thread available on the [PLEX Forums](http://forums.plexapp.com/index.php/topic/27784-eyetv-live-streaming/) as well as a [Wiki page](http://wiki.plexapp.com/index.php/EyeContact).   
 Feel free to fork me and create pull requests.
 
 Software Requirements
