@@ -52,11 +52,27 @@ def TsUNIXToNSDate(seconds):
 		return 0
 
 def ChangePref(key, value):
-	action = HTTP.Request(url='http://%s:32400%s?%s=%s' % (Network.Address, PREFS_URL, String.URLEncode(key), String.URLEncode(value)))
-	#key.replace('_', r'%5f'), value))
-	action.load()
+	addr = Network.Address
+	if addr == None:
+		if Network.PublicAddress != None:
+			addr = Network.PublicAddress
+			Log('Need to use Network.PublicAddress since Address is None!!')
+		else:
+			Log('Need to guess Network.Address since it\'s None!!')
+			addr = '127.0.0.1'
 
-	mo = MessageContainer('Result:', action.content)
+	if value == None:
+		Log('Unable to ChangePref(%s, %s) - None is not a supported value!' % (str(key), str(value)))
+		return False
+
+	try:
+		action = HTTP.Request(url='http://%s:32400%s?%s=%s' % (addr, PREFS_URL, String.URLEncode(key), String.URLEncode(value)))
+		action.load()
+
+		mo = MessageContainer('Result:', action.content)
+	except Exception, e:
+		mo = MessageContainer('Result:', str(e))
+
 	return mo
 
 def SortedKeys(keys):
@@ -76,7 +92,7 @@ def Start():
 
 	ObjectContainer.title1 = TITLE
 	ObjectContainer.view_group = 'List'
-	Log('Started. %s')
+	Log('Started.')
 
 def ValidatePrefs():
 	res = DelayedValidation(do_updates=False)
@@ -106,7 +122,10 @@ def DelayedValidation(do_updates=True):
 
 	if Prefs[PREFS_HOST].lower() in ['127.0.0.1', 'localhost']:
 			if do_updates:
-				ChangePref(PREFS_HOST, str(Network.Address))
+				if Network.Address == None:
+					ChangePref(PREFS_HOST, str(Network.PublicAddress))
+				else:
+					ChangePref(PREFS_HOST, str(Network.Address))
 
 			res_msgs.append(F('PREFS_CHANGED_HOST', Network.Address))
 
@@ -309,18 +328,25 @@ def TokenScanWizard(step):
 
 	if step == '1':
 		message = F('PREFS_TOKEN_WIZ_STEP1', Prefs[PREFS_DEVID])
+		Log('TokenScanWizard: Step 1')
 
 	elif step in ['2', '3', '4', '6', '7']:
 		message = L('PREFS_TOKEN_WIZ_STEP' + step)
+		Log('TokenScanWizard: Step %d' % step)
 
 	elif step == '5':
-		message = F('PREFS_TOKEN_WIZ_STEP5', Network.Address, Network.PublicAddress)
+		message = F('PREFS_TOKEN_WIZ_STEP5', str(Network.Address), str(Network.PublicAddress))
+		Log('TokenScanWizard: Step 5 (%s, %s)' % (str(Network.Address, Network.PublicAddress)))
 
 	elif step == '8':
 		message = F('PREFS_TOKEN_WIZ_STEP8', Prefs[PREFS_DEVID])
+		Log('TokenScanWizard: Step 8 (%s)' % Prefs[PREFS_DEVID])
 
 	elif step == '9':
+		Log('TokenScanWizard: Step 9')
 		res = tokenproxy.RunTokenProxy(120, 2171)
+		Log('res = %s' % str(res))
+
 		if res['error']:
 			oc.header = L('ERROR_TITLE')
 			oc.message = res['error']
