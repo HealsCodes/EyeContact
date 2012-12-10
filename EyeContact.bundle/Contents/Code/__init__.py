@@ -332,7 +332,7 @@ def TokenScanWizard(step):
 
 	elif step in ['2', '3', '4', '6', '7']:
 		message = L('PREFS_TOKEN_WIZ_STEP' + step)
-		Log('TokenScanWizard: Step %d' % step)
+		Log('TokenScanWizard: Step %s' % step)
 
 	elif step == '5':
 		message = F('PREFS_TOKEN_WIZ_STEP5', str(Network.Address), str(Network.PublicAddress))
