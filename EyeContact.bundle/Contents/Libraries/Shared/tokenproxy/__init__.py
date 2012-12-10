@@ -37,6 +37,7 @@ class TokenRequestParser(TokenRequestHandler):
 		self.error_message = message
 
 def RunTokenProxy(runtime, port):
+	connections = 0
 	res = { 'token' : '', 'error' : '' }
 	try:
 		sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -51,6 +52,7 @@ def RunTokenProxy(runtime, port):
 				continue
 
 			(conn, addr) = sock.accept()
+			connections += 1
 			request = TokenRequestParser(conn.recv(4096))
 
 			# discard invalid requests
@@ -117,7 +119,7 @@ def RunTokenProxy(runtime, port):
 			pass
 
 	if not res['token'] and res['error'] == '':
-		res['error'] = 'timeout.'
+		res['error'] = 'timeout (%d connections).' % connections
 
 	if res['token']:
 		print 'Token: %s' % res['token']

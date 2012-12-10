@@ -344,13 +344,13 @@ def TokenScanWizard(step):
 
 	elif step == '9':
 		Log('TokenScanWizard: Step 9')
-		res = tokenproxy.RunTokenProxy(120, 2171)
+		res = tokenproxy.RunTokenProxy(20, 2171)
 		Log('res = %s' % str(res))
 
 		if res['error']:
 			oc.header = L('ERROR_TITLE')
 			oc.message = res['error']
-			message = L('PREFS_TOKEN_WIZ_STEP9_0')
+			message = F('PREFS_TOKEN_WIZ_STEP9_0', res['error'])
 		else:
 			message  = F('PREFS_TOKEN_WIZ_STEP9_1', res['token'])
 			message += L('PREFS_TOKEN_WIZ_STEP9_2')
